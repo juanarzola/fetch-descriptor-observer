@@ -1,11 +1,11 @@
 # FetchDescriptorObserver
 
-Safely performs fetches in the background (at the global executor) as a result of
-updates in the main viewContext for a FetchDescriptor. 
+Safely performs `SwiftData` fetches in the background (at the global executor) as a result of
+updates in the main viewContext for a `FetchDescriptor`. 
 
-The PersistentModel of these fetches can be mapped to a sendable before sending to the main thread.
+The `PersistentModel` of these fetches can be mapped to a sendable before sending to the main thread.
 
-Use this when you would have used @Query, but need to process the data from the PersistentModels in the background
+Use this when you would have used the `@Query` macro, but need to process the data from the PersistentModels in the background
 before converting the result to a sendable for the UI.
 
 Sample usage:
