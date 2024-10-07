@@ -10,9 +10,7 @@ before converting the result to a sendable for the UI.
 
 Sample usage:
 
-
 ```swift
-// 
 @MainActor
 @Observable class ItemTypesObservable {
     // value displayed in the UI
