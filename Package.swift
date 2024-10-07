@@ -4,7 +4,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "FetchDescriptorObserver",
+    name: "fetch-descriptor-observer",
     platforms: [
       .macOS("15.0"),
       .iOS("17.0"),
