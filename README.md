@@ -54,3 +54,10 @@ struct ItemTypesView: View {
 }
 
 ```
+
+## Observing background ModelContext updates
+
+Because observers rely on a container's mainContext updating, they won't automatically update
+when another ModelContext updates the container. To work around this, manually call 
+`ModelContainer.postForcedMainContextUpdate` to update all observers 
+after other ModelContexts finish their writes.

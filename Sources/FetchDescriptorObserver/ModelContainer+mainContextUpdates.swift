@@ -19,7 +19,11 @@ extension ModelContainer {
     ) -> AsyncStream<Void> {
         return AsyncStream<Void> { continuation in
             let mainContext = mainContext
-            let publisher = {
+            let forcedUpdatePublisher = NotificationCenter.default.publisher(
+                for: ModelContainer.mainContextForcedUpdate,
+                object: self
+            ).receive(on: DispatchQueue.main)
+            let updatesPublisher = {
                 // willSave only started working in iOS 18
                 if #available(iOS 18, *) {
                     NotificationCenter.default.publisher(for: ModelContext.willSave, object: mainContext)
@@ -27,9 +31,13 @@ extension ModelContainer {
                     NotificationCenter.default.publisher(for: Notification.Name("NSObjectsChangedInManagingContextNotification"), object: mainContext)
                 }
             }()
-            let cancellable = publisher.sink { _ in
+            let cancellable = updatesPublisher.merge(with: forcedUpdatePublisher).sink { _ in
                 continuation.finish()
             } receiveValue: { notification in
+                if notification.name == ModelContainer.mainContextForcedUpdate {
+                    continuation.yield()
+                    return
+                }
                 guard let modelContext = notification.object as? ModelContext else {
                     return
                 }
@@ -50,4 +58,13 @@ extension ModelContainer {
             }
         }
     }
+
+    public func postForcedMainContextUpdate() {
+        NotificationCenter.default.post(
+            name: ModelContainer.mainContextForcedUpdate,
+            object: self
+        )
+    }
+
+    public static let mainContextForcedUpdate = Notification.Name("__MainContextForcedUpdate")
 }
