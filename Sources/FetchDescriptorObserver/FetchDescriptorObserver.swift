@@ -14,8 +14,19 @@ public extension FetchDescriptor {
     ) -> FetchDescriptorObserver<T, R> {
         FetchDescriptorObserver(fetchDescriptor: self, map: map)
     }
+
     func makeObserver() -> FetchDescriptorObserver<T, Void> {
         makeObserver(map: { _ in })
+    }
+
+    func makeCountObserver<R>(
+        map: @escaping (Int) -> R
+    ) -> FetchDescriptorCountObserver<T, R> {
+        FetchDescriptorCountObserver(fetchDescriptor: self, map: map)
+    }
+
+    func makeCountObserver() -> FetchDescriptorCountObserver<T, Int> {
+        FetchDescriptorCountObserver(fetchDescriptor: self, map: { $0 })
     }
 }
 
@@ -37,7 +48,69 @@ public class FetchDescriptorObserver<T: PersistentModel, Result: Sendable> {
     public func values(_ container: ModelContainer) -> AsyncBufferSequence<AsyncThrowingStream<Result, any Error>> {
         let observableQuery = observableQuery
 
-        // if there's no updatesSequence yet
+        let updates = makeUpdatesSequence(with: container)
+        return AsyncThrowingStream<Result, Error> { (continuation) in
+            let task = Task {
+                nonisolated func fetch() async throws -> Result {
+                    let results = try observableQuery.fetch(in: container)
+                    return results
+                }
+                do {
+                    for try await _ in updates {
+                        if Task.isCancelled {
+                            break
+                        }
+                        let results = try await fetch()
+                        continuation.yield(results)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+        .buffer(policy: .bufferingLatest(1))
+    }
+
+    @MainActor
+    private func makeUpdatesSequence(
+        with container: ModelContainer
+    ) ->  AsyncMerge2Sequence<AsyncStream<Void>, AsyncStream<Void>> {
+        let initialLoad = AsyncStream<Void>() { continuation in
+            continuation.yield()
+            continuation.finish()
+        }
+        let allUpdates = merge(
+            // first update is the initial load
+            initialLoad,
+            observableQuery
+                .makeUpdatesStream(with: container)
+        )
+        return allUpdates
+    }
+}
+
+public class FetchDescriptorCountObserver<T: PersistentModel, Result: Sendable> {
+    private let observableQuery: FetchDescriptorCountObservableQuery<T, Result>
+
+    public init(
+        fetchDescriptor: FetchDescriptor<T>,
+        map: @escaping (Int) -> Result
+    ){
+        self.observableQuery = FetchDescriptorCountObservableQuery(
+            fetchDescriptor: fetchDescriptor,
+            map: map
+        )
+    }
+
+    /// Returns a stream of all values of the FetchDescriptor. Buffers the last value so that clients don't miss values before consumption.
+    @MainActor
+    public func values(_ container: ModelContainer) -> AsyncBufferSequence<AsyncThrowingStream<Result, any Error>> {
+        let observableQuery = observableQuery
+
         let updates = makeUpdatesSequence(with: container)
         return AsyncThrowingStream<Result, Error> { (continuation) in
             let task = Task {
@@ -98,6 +171,24 @@ private struct FetchDescriptorObservableQuery<T: PersistentModel, Result>: Obser
         container.mainContextUpdates(relevantTo: FetchDescriptor<T>.self )
     }
 }
+
+private struct FetchDescriptorCountObservableQuery<T: PersistentModel, Result>: ObservableQuery {
+    let fetchDescriptor: FetchDescriptor<T>
+    let map: (Int) -> Result
+
+    func fetch(in container: ModelContainer) throws -> Result {
+        let modelContext = ModelContext(container)
+        let data = try modelContext.fetchCount(fetchDescriptor)
+        let res = map(data)
+        return res
+    }
+
+    @MainActor
+    func makeUpdatesStream(with container: ModelContainer) -> AsyncStream<Void> {
+        container.mainContextUpdates(relevantTo: FetchDescriptor<T>.self )
+    }
+}
+
 
 private protocol ObservableQuery {
     associatedtype Result
