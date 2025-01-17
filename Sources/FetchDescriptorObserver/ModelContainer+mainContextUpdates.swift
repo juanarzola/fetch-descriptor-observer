@@ -23,38 +23,66 @@ extension ModelContainer {
                 for: ModelContainer.mainContextForcedUpdate,
                 object: self
             ).receive(on: DispatchQueue.main)
-            let updatesPublisher = {
-                // willSave only started working in iOS 18
-                if #available(iOS 18, *) {
-                    NotificationCenter.default.publisher(for: ModelContext.willSave, object: mainContext)
-                } else {
-                    NotificationCenter.default.publisher(for: Notification.Name("NSObjectsChangedInManagingContextNotification"), object: mainContext)
+
+            if #available(iOS 18, *) {
+                let updatesPublisher = NotificationCenter.default.publisher(for: ModelContext.didSave, object: mainContext)
+                let cancellable = updatesPublisher.merge(with: forcedUpdatePublisher).sink { _ in
+                    continuation.finish()
+                } receiveValue: { (notification) in
+                    if notification.name == ModelContainer.mainContextForcedUpdate {
+                        continuation.yield()
+                        return
+                    }
+
+                    /// ModelContext.NotificationKey.deletedIdentifiers doesn't work. Notifications actually send those deleted identifiers under "deleted".
+                    /// I can only guess it's a bug, so prioritize using the official API, but fallback to the debugged one.
+                    let userInfo = notification.userInfo ?? [:]
+                    let deleted = userInfo[ModelContext.NotificationKey.deletedIdentifiers] as? [PersistentIdentifier] ?? userInfo["deleted"] as? [PersistentIdentifier] ?? []
+                    let updated = userInfo[ModelContext.NotificationKey.updatedIdentifiers] as? [PersistentIdentifier] ?? userInfo["updated"] as? [PersistentIdentifier] ?? []
+                    let inserted = userInfo[ModelContext.NotificationKey.insertedIdentifiers] as? [PersistentIdentifier] ?? userInfo["inserted"] as? [PersistentIdentifier] ?? []
+                    let allUpdates = deleted + updated + inserted
+
+                    let names = ["\(T.self)"]
+                    let isRelevantUpdate = allUpdates.contains(where: { persistentModelID in
+                        names.contains { persistentModelID.entityName == $0 }
+                    })
+                    if isRelevantUpdate {
+                        continuation.yield()
+                    }
                 }
-            }()
-            let cancellable = updatesPublisher.merge(with: forcedUpdatePublisher).sink { _ in
-                continuation.finish()
-            } receiveValue: { notification in
-                if notification.name == ModelContainer.mainContextForcedUpdate {
-                    continuation.yield()
-                    return
+                continuation.onTermination = { _ in
+                    cancellable.cancel()
                 }
-                guard let modelContext = notification.object as? ModelContext else {
-                    return
+            } else {
+                let updatesPublisher = NotificationCenter.default.publisher(
+                    for: Notification.Name("NSObjectsChangedInManagingContextNotification"),
+                    object: mainContext
+                )
+                let cancellable = updatesPublisher.merge(with: forcedUpdatePublisher).sink { _ in
+                    continuation.finish()
+                } receiveValue: { (notification) in
+                    if notification.name == ModelContainer.mainContextForcedUpdate {
+                        continuation.yield()
+                        return
+                    }
+                    guard let modelContext = notification.object as? ModelContext else {
+                        return
+                    }
+                    let deleted = modelContext.deletedModelsArray
+                    let updated = modelContext.changedModelsArray
+                    let inserted = modelContext.insertedModelsArray
+                    let allUpdates = deleted + updated + inserted
+                    let names = ["\(T.self)"]
+                    let isRelevantUpdate = allUpdates.contains(where: { object in
+                        names.contains { object.persistentModelID.entityName == $0 }
+                    })
+                    if isRelevantUpdate {
+                        continuation.yield()
+                    }
                 }
-                let deleted = modelContext.deletedModelsArray
-                let updated = modelContext.changedModelsArray
-                let inserted = modelContext.insertedModelsArray
-                let allUpdates = deleted + updated + inserted
-                let names = ["\(T.self)"]
-                let isRelevantUpdate = allUpdates.contains(where: { object in
-                    names.contains { object.persistentModelID.entityName == $0 }
-                })
-                if isRelevantUpdate {
-                    continuation.yield()
+                continuation.onTermination = { _ in
+                    cancellable.cancel()
                 }
-            }
-            continuation.onTermination = { a in
-                cancellable.cancel()
             }
         }
     }
