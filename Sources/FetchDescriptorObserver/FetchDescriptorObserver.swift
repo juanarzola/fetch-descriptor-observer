@@ -31,7 +31,14 @@ public extension FetchDescriptor {
 }
 
 public class FetchDescriptorObserver<T: PersistentModel, Result: Sendable> {
+    /// When true, update events do not trigger a fetch; the observer still observes.
+    public var isPaused: Bool {
+        get { pauseController.isPaused }
+        set { pauseController.isPaused = newValue }
+    }
+
     private let observableQuery: FetchDescriptorObservableQuery<T, Result>
+    private let pauseController = PauseController()
 
     public init(
         fetchDescriptor: FetchDescriptor<T>,
@@ -47,8 +54,9 @@ public class FetchDescriptorObserver<T: PersistentModel, Result: Sendable> {
     @MainActor
     public func values(_ container: ModelContainer) -> AsyncBufferSequence<AsyncThrowingStream<Result, any Error>> {
         let observableQuery = observableQuery
+        let controller = pauseController
 
-        let updates = makeUpdatesSequence(with: container)
+        let updates = makeUpdatesSequence(with: container, pauseController: controller)
         return AsyncThrowingStream<Result, Error> { (continuation) in
             let task = Task {
                 nonisolated func fetch() async throws -> Result {
@@ -60,11 +68,16 @@ public class FetchDescriptorObserver<T: PersistentModel, Result: Sendable> {
                         if Task.isCancelled {
                             break
                         }
-                        let results = try await fetch()
-                        continuation.yield(results)
+                        let shouldFetch = controller.onUpdate()
+                        if shouldFetch {
+                            let results = try await fetch()
+                            continuation.yield(results)
+                        }
                     }
+                    controller.streamDidFinish()
                     continuation.finish()
                 } catch {
+                    controller.streamDidFinish()
                     continuation.finish(throwing: error)
                 }
             }
@@ -77,24 +90,32 @@ public class FetchDescriptorObserver<T: PersistentModel, Result: Sendable> {
 
     @MainActor
     private func makeUpdatesSequence(
-        with container: ModelContainer
-    ) ->  AsyncMerge2Sequence<AsyncStream<Void>, AsyncStream<Void>> {
+        with container: ModelContainer,
+        pauseController: PauseController
+    ) -> AsyncMerge2Sequence<AsyncMerge2Sequence<AsyncStream<Void>, AsyncStream<Void>>, AsyncStream<Void>> {
         let initialLoad = AsyncStream<Void>() { continuation in
             continuation.yield()
             continuation.finish()
         }
-        let allUpdates = merge(
-            // first update is the initial load
+        let baseUpdates = merge(
             initialLoad,
-            observableQuery
-                .makeUpdatesStream(with: container)
+            observableQuery.makeUpdatesStream(with: container)
         )
-        return allUpdates
+        let (resumeStream, resumeContinuation) = AsyncStream<Void>.makeStream()
+        pauseController.resumeContinuation = resumeContinuation
+        return merge(baseUpdates, resumeStream)
     }
 }
 
 public class FetchDescriptorCountObserver<T: PersistentModel, Result: Sendable> {
+    /// When true, update events do not trigger a fetch; the observer still observes.
+    public var isPaused: Bool {
+        get { pauseController.isPaused }
+        set { pauseController.isPaused = newValue }
+    }
+    
     private let observableQuery: FetchDescriptorCountObservableQuery<T, Result>
+    private let pauseController = PauseController()
 
     public init(
         fetchDescriptor: FetchDescriptor<T>,
@@ -110,8 +131,9 @@ public class FetchDescriptorCountObserver<T: PersistentModel, Result: Sendable> 
     @MainActor
     public func values(_ container: ModelContainer) -> AsyncBufferSequence<AsyncThrowingStream<Result, any Error>> {
         let observableQuery = observableQuery
+        let controller = pauseController
 
-        let updates = makeUpdatesSequence(with: container)
+        let updates = makeUpdatesSequence(with: container, pauseController: controller)
         return AsyncThrowingStream<Result, Error> { (continuation) in
             let task = Task {
                 nonisolated func fetch() async throws -> Result {
@@ -123,11 +145,16 @@ public class FetchDescriptorCountObserver<T: PersistentModel, Result: Sendable> 
                         if Task.isCancelled {
                             break
                         }
-                        let results = try await fetch()
-                        continuation.yield(results)
+                        let shouldFetch = controller.onUpdate()
+                        if shouldFetch {
+                            let results = try await fetch()
+                            continuation.yield(results)
+                        }
                     }
+                    controller.streamDidFinish()
                     continuation.finish()
                 } catch {
+                    controller.streamDidFinish()
                     continuation.finish(throwing: error)
                 }
             }
@@ -140,19 +167,20 @@ public class FetchDescriptorCountObserver<T: PersistentModel, Result: Sendable> 
 
     @MainActor
     private func makeUpdatesSequence(
-        with container: ModelContainer
-    ) ->  AsyncMerge2Sequence<AsyncStream<Void>, AsyncStream<Void>> {
+        with container: ModelContainer,
+        pauseController: PauseController
+    ) -> AsyncMerge2Sequence<AsyncMerge2Sequence<AsyncStream<Void>, AsyncStream<Void>>, AsyncStream<Void>> {
         let initialLoad = AsyncStream<Void>() { continuation in
             continuation.yield()
             continuation.finish()
         }
-        let allUpdates = merge(
-            // first update is the initial load
+        let baseUpdates = merge(
             initialLoad,
-            observableQuery
-                .makeUpdatesStream(with: container)
+            observableQuery.makeUpdatesStream(with: container)
         )
-        return allUpdates
+        let (resumeStream, resumeContinuation) = AsyncStream<Void>.makeStream()
+        pauseController.resumeContinuation = resumeContinuation
+        return merge(baseUpdates, resumeStream)
     }
 }
 
@@ -189,11 +217,49 @@ private struct FetchDescriptorCountObservableQuery<T: PersistentModel, Result>: 
     }
 }
 
-
 private protocol ObservableQuery {
     associatedtype Result
     /// synchronously load results for the query
     func fetch(in container: ModelContainer) throws -> Result
     /// Return an async stream that emits when the query needs to be updated
     @MainActor func makeUpdatesStream(with container: ModelContainer) -> AsyncStream<Void>
+}
+
+// MARK: - Pause / Resume
+
+/// Handles pause and resume of observers
+private final class PauseController {
+    private var _isPaused = false
+    var isPaused: Bool {
+        get {
+            _isPaused
+        }
+        set {
+            _isPaused = newValue
+
+            // ensure that pending updates are sent only if the AsyncStream is still emiting values.
+            if !newValue, pendingUpdate, isStreamActive, let resumeContinuation {
+                pendingUpdate = false
+                resumeContinuation.yield()
+            }
+        }
+    }
+    var pendingUpdate = false
+    var isStreamActive = true
+    var resumeContinuation: AsyncStream<Void>.Continuation?
+
+    /// Called when an update event is received. Returns true if the observer should fetch and yield.
+    func onUpdate() -> Bool {
+        if isPaused {
+            pendingUpdate = true
+            return false
+        }
+        return true
+    }
+
+    func streamDidFinish() {
+        isStreamActive = false
+        resumeContinuation?.finish()
+        resumeContinuation = nil
+    }
 }
