@@ -10,7 +10,7 @@ import AsyncAlgorithms
 
 public extension FetchDescriptor {
     func makeObserver<R>(
-        map: @escaping ([T]) -> R
+        map: @escaping @Sendable ([T]) -> R
     ) -> FetchDescriptorObserver<T, R> {
         FetchDescriptorObserver(fetchDescriptor: self, map: map)
     }
@@ -20,7 +20,7 @@ public extension FetchDescriptor {
     }
 
     func makeCountObserver<R>(
-        map: @escaping (Int) -> R
+        map: @escaping @Sendable (Int) -> R
     ) -> FetchDescriptorCountObserver<T, R> {
         FetchDescriptorCountObserver(fetchDescriptor: self, map: map)
     }
@@ -42,7 +42,7 @@ public class FetchDescriptorObserver<T: PersistentModel, Result: Sendable> {
 
     public init(
         fetchDescriptor: FetchDescriptor<T>,
-        map: @escaping ([T]) -> Result
+        map: @escaping @Sendable ([T]) -> Result
     ){
         self.observableQuery = FetchDescriptorObservableQuery(
             fetchDescriptor: fetchDescriptor,
@@ -119,7 +119,7 @@ public class FetchDescriptorCountObserver<T: PersistentModel, Result: Sendable> 
 
     public init(
         fetchDescriptor: FetchDescriptor<T>,
-        map: @escaping (Int) -> Result
+        map: @escaping @Sendable (Int) -> Result
     ){
         self.observableQuery = FetchDescriptorCountObservableQuery(
             fetchDescriptor: fetchDescriptor,
@@ -184,9 +184,9 @@ public class FetchDescriptorCountObserver<T: PersistentModel, Result: Sendable> 
     }
 }
 
-private struct FetchDescriptorObservableQuery<T: PersistentModel, Result>: ObservableQuery {
+private struct FetchDescriptorObservableQuery<T: PersistentModel, Result>: ObservableQuery, Sendable {
     let fetchDescriptor: FetchDescriptor<T>
-    let map: ([T]) -> Result
+    let map: @Sendable ([T]) -> Result
     func fetch(in container: ModelContainer) throws -> Result {
         let modelContext = ModelContext(container)
         let data = try modelContext.fetch(fetchDescriptor)
@@ -200,9 +200,9 @@ private struct FetchDescriptorObservableQuery<T: PersistentModel, Result>: Obser
     }
 }
 
-private struct FetchDescriptorCountObservableQuery<T: PersistentModel, Result>: ObservableQuery {
+private struct FetchDescriptorCountObservableQuery<T: PersistentModel, Result>: ObservableQuery, Sendable {
     let fetchDescriptor: FetchDescriptor<T>
-    let map: (Int) -> Result
+    let map: @Sendable (Int) -> Result
 
     func fetch(in container: ModelContainer) throws -> Result {
         let modelContext = ModelContext(container)
